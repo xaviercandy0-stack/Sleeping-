@@ -1,0 +1,457 @@
+--!nocheck
+--!nolint
+local runUnlockAllCosmetics
+if getgenv and type(getgenv) == "function" and getgenv().meow_cleanup then pcall(function() getgenv().meow_cleanup() end) end
+
+local Players = cloneref and cloneref(game:GetService("Players")) or game:GetService("Players")
+local RunService = cloneref and cloneref(game:GetService("RunService")) or game:GetService("RunService")
+local Workspace = cloneref and cloneref(game:GetService("Workspace")) or game:GetService("Workspace")
+local UserInputService = cloneref and cloneref(game:GetService("UserInputService")) or game:GetService("UserInputService")
+local TweenService = cloneref and cloneref(game:GetService("TweenService")) or game:GetService("TweenService")
+local SoundService = cloneref and cloneref(game:GetService("SoundService")) or game:GetService("SoundService")
+local Lighting = cloneref and cloneref(game:GetService("Lighting")) or game:GetService("Lighting")
+local TeleportService = cloneref and cloneref(game:GetService("TeleportService")) or game:GetService("TeleportService")
+local HttpService = cloneref and cloneref(game:GetService("HttpService")) or game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+getgenv().meow_flags = getgenv().meow_flags or {}
+local flags = getgenv().meow_flags
+
+local meowState = {
+    Destroyed = false,
+    PriorityList = {},
+    CustomSoundCache = {},
+    ModDetectorChecked = {},
+    CurrentTarget = nil,
+    LastTargetPlayer = nil,
+    LastMeleeAttack = 0,
+    KnifeAt = 0,
+    KnifeBurst = 0,
+    IndicatorLabel = nil,
+    IndicatorGui = nil,
+    IndicatorFrame = nil,
+    ManipulatedActive = false,
+    DamageDealt = 0,
+    DamageTaken = 0,
+    LastHitmarkerTime = 0,
+
+    TargetHudGui = nil,
+    TargetHudFrame = nil,
+    TargetHighlight = nil,
+    TargetSnapline = nil,
+    CrosshairLines = {},
+    CrosshairOutlines = {},
+    SilentFovCircle = nil,
+    SilentFovOutline = nil,
+    AimbotFovCircle = nil,
+    TracerDrawings = {},
+    OriginalCameraFov = nil,
+
+    EspBoxes = {},
+    ChamsHighlights = {},
+
+    AppliedAdornments = {},
+    AppliedSelectionBoxes = {},
+    WeaponHighlight = nil,
+    SavedPartProps = {},
+    LastItemVisual = nil,
+
+    OriginalSkybox = nil,
+    ActiveSkybox = nil,
+}
+
+local fakePos = {
+    Enabled           = false,
+    Depth             = 5.8,
+    WalkMode          = true,
+    SurfaceCamera     = true,
+    AutoNoclip        = true,
+    AutoHandoff       = true,
+    VisualizerEnabled = true,
+    VisualizerColor   = Color3.fromRGB(0, 162, 255),
+    Panic             = false,
+    PanicMinX         = -5,
+    PanicMaxX         = 5,
+    PanicZ            = false,
+    HideMeshes        = true,
+    AnimationDesync   = true,
+    ZeroVelocity      = true,
+    CustomPitch       = 0,
+    CustomYaw         = 0,
+    InvertPitch       = false,
+    DesyncMode        = "Position Desync V2",
+
+    VirtualCF         = nil,
+    LastMoveDir       = Vector3.zero,
+    GhostBox          = nil,
+    AnimTrack         = nil,
+    OriginalParts     = nil,
+    HandoffTicks      = 0,
+    ClientCF          = nil,
+    FakeCF            = nil,
+}
+
+local movementState = {
+    WalkSpeedEnabled  = false,
+    WalkSpeedMult     = 1.0,
+    SlidingEnabled    = false,
+    SlidingMult       = 1.0,
+    NoclipEnabled     = false,
+    FlightEnabled     = false,
+    FlightSpeed       = 100,
+    DoubleJump        = false,
+    DoubleJumpHeight  = 1.0,
+    LongJump          = false,
+    LongJumpMode      = "Camera Look",
+    LongJumpForce     = 150,
+    LongJumpUpward    = 100,
+    AutoStrafe        = false,
+    AutoStrafeSpeed   = 50,
+}
+
+local staffDetectorState = {
+    Enabled           = true,
+    AutoHop           = false,
+    AutoKick          = false,
+    DetectedStaff     = {},
+}
+
+local function undergroundCaptureOriginal()
+    local char = LocalPlayer and LocalPlayer.Character
+    if not char then return end
+    fakePos.OriginalParts = {}
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") or part:IsA("Decal") then
+            table.insert(fakePos.OriginalParts, { part = part, transparency = part.Transparency })
+            if fakePos.HideMeshes then
+                pcall(function() part.Transparency = 1 end)
+            end
+        end
+    end
+end
+
+local function undergroundRestoreOriginal()
+    if not fakePos.OriginalParts then return end
+    for _, data in ipairs(fakePos.OriginalParts) do
+        if data.part and data.part.Parent then
+            pcall(function() data.part.Transparency = data.transparency end)
+        end
+    end
+    fakePos.OriginalParts = nil
+end
+
+local function playAnimDesync()
+    local char = LocalPlayer and LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    if not fakePos.AnimTrack then
+        pcall(function()
+            local anim = Instance.new("Animation")
+            anim.AnimationId = "rbxassetid://10714003221"
+            local track = hum:LoadAnimation(anim)
+            track:Play(0, 1, 0)
+            track.TimePosition = 1.48
+            fakePos.AnimTrack = track
+        end)
+    end
+end
+
+local function stopAnimDesync()
+    if fakePos.AnimTrack then
+        pcall(function()
+            fakePos.AnimTrack:Stop()
+            fakePos.AnimTrack:Destroy()
+        end)
+        fakePos.AnimTrack = nil
+    end
+end
+
+local function updateGhostVisualizer()
+    local coreGui = cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui")
+    if fakePos.Enabled and fakePos.VisualizerEnabled and fakePos.VirtualCF and not meowState.Destroyed then
+        if not fakePos.GhostBox or not fakePos.GhostBox.Parent then
+            local box = Instance.new("BoxHandleAdornment")
+            box.Name = "_MeowFakePosGhost"
+            box.Size = Vector3.new(2, 5, 1)
+            box.Color3 = fakePos.VisualizerColor or Color3.fromRGB(0, 162, 255)
+            box.Transparency = 0.55
+            box.AlwaysOnTop = true
+            box.ZIndex = 5
+            box.Adornee = workspace.Terrain
+            pcall(function() box.Parent = coreGui end)
+            fakePos.GhostBox = box
+        end
+        fakePos.GhostBox.CFrame = fakePos.VirtualCF
+        fakePos.GhostBox.Color3 = fakePos.VisualizerColor or Color3.fromRGB(0, 162, 255)
+    else
+        if fakePos.GhostBox then
+            pcall(function() fakePos.GhostBox:Destroy() end)
+            fakePos.GhostBox = nil
+        end
+    end
+end
+
+local function set_position_desync(source, clientCF, serverCF)
+    local genv = getgenv()
+    genv.position_desync_source = source
+    genv.client_position = typeof(clientCF) == "CFrame" and clientCF.Position or clientCF
+    genv.server_position = typeof(serverCF) == "CFrame" and serverCF.Position or serverCF
+    genv.v2_tp_pos = (source == "v2" and genv.server_position) or nil
+    fakePos.ClientCF = clientCF
+    fakePos.FakeCF = serverCF
+end
+
+local function clear_position_desync()
+    local genv = getgenv()
+    local char = LocalPlayer and LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local pos = hrp and hrp.Position
+    genv.position_desync_source = nil
+    genv.client_position = pos
+    genv.server_position = pos
+    genv.v2_tp_pos = nil
+    fakePos.ClientCF = nil
+    fakePos.FakeCF = nil
+end
+
+getgenv().set_position_desync = set_position_desync
+getgenv().clear_position_desync = clear_position_desync
+
+local function setFakePosition(state)
+    if fakePos.Enabled == state then return end
+    fakePos.Enabled = state
+    flags.fake_position_enabled = state
+    getgenv().FakePositionEnabled = state
+    getgenv().HideUndergroundEnabled = state
+    meowState.ManipulatedActive = state
+
+    local char = LocalPlayer and LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+    if state then
+        if hrp then
+            fakePos.VirtualCF = hrp.CFrame
+        end
+        if fakePos.HideMeshes then undergroundCaptureOriginal() end
+        if fakePos.AnimationDesync then playAnimDesync() end
+
+        pcall(function()
+            RunService:UnbindFromRenderStep("FakePosCameraElevation")
+        end)
+        RunService:BindToRenderStep("FakePosCameraElevation", 201, function()
+            if fakePos.Enabled and fakePos.SurfaceCamera and not meowState.Destroyed then
+                local cam = workspace.CurrentCamera
+                local depth = flags.fake_position_depth or fakePos.Depth or 5.8
+                if cam and depth > 0 then
+                    cam.CFrame = cam.CFrame + Vector3.new(0, depth, 0)
+                end
+            end
+        end)
+    else
+        pcall(function()
+            RunService:UnbindFromRenderStep("FakePosCameraElevation")
+        end)
+        undergroundRestoreOriginal()
+        stopAnimDesync()
+        updateGhostVisualizer()
+
+        if hrp and fakePos.VirtualCF then
+            pcall(function()
+                if fakePos.ZeroVelocity then
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    hrp.AssemblyAngularVelocity = Vector3.zero
+                end
+                hrp.CFrame = fakePos.VirtualCF
+            end)
+        end
+        fakePos.VirtualCF = nil
+        fakePos.HandoffTicks = 0
+        clear_position_desync()
+    end
+end
+
+getgenv().SetFakePosition = setFakePosition
+getgenv().ToggleFakePosition = function()
+    setFakePosition(not fakePos.Enabled)
+    return fakePos.Enabled
+end
+getgenv().SetFakePositionDepth = function(d)
+    if type(d) == "number" then fakePos.Depth = d end
+end
+getgenv().SetFakePositionHideMesh = function(h)
+    fakePos.HideMeshes = (h == true)
+    if not fakePos.HideMeshes then
+        undergroundRestoreOriginal()
+    elseif fakePos.Enabled then
+        undergroundCaptureOriginal()
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if UserInputService:GetFocusedTextBox() then return end
+    local targetKey = flags.fake_position_keybind or Enum.KeyCode.X
+    if input.KeyCode == targetKey then
+        setFakePosition(not fakePos.Enabled)
+        pcall(function()
+            if Library and Library.notifications then
+                Library.notifications:create_notification({
+                    name = "Fake Position",
+                    info = fakePos.Enabled and ("Enabled (" .. tostring(fakePos.Depth) .. " studs underground)") or "Disabled",
+                    lifetime = 2
+                })
+            end
+        end)
+    end
+end)
+
+RunService.Heartbeat:Connect(function(dt)
+    if not fakePos.Enabled or meowState.Destroyed then return end
+    local char = LocalPlayer and LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    if fakePos.HandoffTicks > 0 then
+        fakePos.HandoffTicks = fakePos.HandoffTicks - 1
+        if fakePos.VirtualCF then
+            hrp.CFrame = fakePos.VirtualCF
+            set_position_desync("handoff", fakePos.VirtualCF, hrp.CFrame)
+        end
+        return
+    end
+
+    if not fakePos.VirtualCF then
+        fakePos.VirtualCF = hrp.CFrame
+    end
+
+    local cam = Workspace.CurrentCamera
+    local camLook = cam and cam.CFrame.LookVector or Vector3.new(0, 0, -1)
+    local camYaw = math.atan2(-camLook.X, -camLook.Z)
+    local surfaceRot = CFrame.Angles(0, camYaw, 0)
+
+    if not fakePos.VirtualCF then
+        fakePos.VirtualCF = CFrame.new(hrp.CFrame.Position) * surfaceRot
+    end
+
+    if fakePos.WalkMode then
+        local moveDir = hum.MoveDirection
+        if moveDir.Magnitude > 0 then
+            local speed = hum.WalkSpeed * (movementState.WalkSpeedEnabled and movementState.WalkSpeedMult or 1)
+            local deltaPos = moveDir * (speed * dt)
+            fakePos.VirtualCF = CFrame.new(fakePos.VirtualCF.Position + deltaPos) * surfaceRot
+        else
+            fakePos.VirtualCF = CFrame.new(fakePos.VirtualCF.Position) * surfaceRot
+        end
+    else
+        fakePos.VirtualCF = CFrame.new(fakePos.VirtualCF.Position) * surfaceRot
+    end
+
+    local depth = flags.fake_position_depth or fakePos.Depth or 5.8
+    local undergroundPos = fakePos.VirtualCF.Position - Vector3.new(0, depth, 0)
+
+    if fakePos.Panic then
+        local minX = math.min(fakePos.PanicMinX, fakePos.PanicMaxX)
+        local maxX = math.max(fakePos.PanicMinX, fakePos.PanicMaxX)
+        local jx = minX + math.random() * (maxX - minX)
+        local jz = fakePos.PanicZ and ((math.random() - 0.5) * (maxX - minX)) or 0
+        undergroundPos = undergroundPos + Vector3.new(jx, 0, jz)
+    end
+
+    local pitchAngle = fakePos.InvertPitch and (fakePos.CustomPitch or 0) or 0
+    local pitchCF = CFrame.Angles(math.rad(pitchAngle), math.rad(fakePos.CustomYaw or 0), 0)
+
+    if fakePos.AutoNoclip then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+            end
+        end
+    end
+
+    if fakePos.ZeroVelocity then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    hrp.CFrame = CFrame.new(undergroundPos) * surfaceRot * pitchCF
+
+    set_position_desync("fake", fakePos.VirtualCF, hrp.CFrame)
+
+    updateGhostVisualizer()
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not fakePos.Enabled or not fakePos.HideMeshes or meowState.Destroyed then return end
+    if not fakePos.OriginalParts then return end
+    for _, data in ipairs(fakePos.OriginalParts) do
+        local part = data.part
+        if part and part.Parent and part.Transparency ~= 1 then
+            pcall(function() part.Transparency = 1 end)
+        end
+    end
+end)
+
+RunService.Stepped:Connect(function()
+    if meowState.Destroyed then return end
+    local char = LocalPlayer and LocalPlayer.Character
+    if not char then return end
+
+    if movementState.NoclipEnabled then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+            end
+        end
+    end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        if movementState.WalkSpeedEnabled and movementState.WalkSpeedMult > 1.0 then
+            hum.WalkSpeed = 16 * movementState.WalkSpeedMult
+        end
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not movementState.FlightEnabled or meowState.Destroyed then return end
+    local char = LocalPlayer and LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local cam = Workspace.CurrentCamera
+    local moveDir = Vector3.zero
+
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + cam.CFrame.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - cam.CFrame.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - cam.CFrame.RightVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + cam.CFrame.RightVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then moveDir = moveDir - Vector3.new(0, 1, 0) end
+
+    if moveDir.Magnitude > 0 then
+        hrp.Velocity = moveDir.Unit * movementState.FlightSpeed
+    else
+        hrp.Velocity = Vector3.zero
+    end
+end)
+
+UserInputService.JumpRequest:Connect(function()
+    if meowState.Destroyed then return end
+    local char = LocalPlayer and LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+
+    if movementState.DoubleJump then
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        hrp.Velocity = Vector3.new(hrp.Velocity.X, 50 * movementState.DoubleJumpHeight, hrp.Velocity.Z)
+    end
+
+    if movementState.LongJump then
+        local cam = Workspace.CurrentCamera
+        local dir = (movementState.LongJumpMode == "Camera Look" and cam and cam.CFrame.LookVector) or hrp.CFrame.LookVector
+        hrp.Velocity = Vector3.new(dir.X * movementState.LongJumpForce, movementState.LongJumpUpward, dir.Z * movementState.
